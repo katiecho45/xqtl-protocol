@@ -31,7 +31,7 @@ sampling:
   npr_train: 10
   npr_test: 10
 
-# FIXED: Match your actual threshold values
+# FIXED: Match your actual data values - keeping original test thresholds as they may be intentional
 thresholds:
   train:
     positive_class_threshold: 0.1

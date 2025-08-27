@@ -6,7 +6,7 @@ catboost_params:
   # Standard/Original parameters
   standard:
     depth: 6
-    iterations: 1000
+    iterations: 100
     learning_rate: 0.03
     l2_leaf_reg: 3.0
     min_data_in_leaf: 10
@@ -15,7 +15,7 @@ catboost_params:
   # Conservative parameters (to reduce overfitting)
   conservative:
     depth: 5
-    iterations: 1000
+    iterations: 100
     learning_rate: 0.03
     l2_leaf_reg: 5.0
     min_data_in_leaf: 10

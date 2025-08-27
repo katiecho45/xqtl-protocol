@@ -83,11 +83,13 @@ NPR_te = params_data['sampling']['npr_test']
 
 chromosome_out = f'chr{chromosome}'
 
-# For demo purposes with limited sample data, use chr2 for both training and testing
-chromosomes = [f'chr{chromosome}']
+# Set up chromosomes - will validate data availability later
 train_chromosomes = [f'chr{chromosome}']
 test_chromosomes = [f'chr{chromosome}']
 num_train_chromosomes = len(train_chromosomes)
+
+print(f"NOTE: Currently using same chromosome ({chromosome}) for train/test due to limited data.")
+print(f"The train/test split will rely on different data directories with different sampling thresholds.")
 
 # Load gene constraint data with configurable sheet name
 gene_lof_df = pd.read_excel(gene_lof_file, params_data['gene_constraint_sheet'])
@@ -181,11 +183,15 @@ train_df = train_df.merge(maf_df, on='variant_id', how='left')
 
 #find rows with missing gene_lof
 
-#fill missing gene_lof with median
+# Calculate imputation statistics from training data only to prevent data leakage
+train_gene_lof_median = train_df['gene_lof'].median()
+train_gnomad_maf_median = train_df['gnomad_MAF'].median()
 
-train_df['gene_lof'] = train_df['gene_lof'].fillna(train_df['gene_lof'].median())
+print(f"Training data imputation - gene_lof median: {train_gene_lof_median:.6f}, gnomad_MAF median: {train_gnomad_maf_median:.6f}")
 
-train_df['gnomad_MAF'] = train_df['gnomad_MAF'].fillna(train_df['gnomad_MAF'].median())
+# Apply imputation using training statistics
+train_df['gene_lof'] = train_df['gene_lof'].fillna(train_gene_lof_median)
+train_df['gnomad_MAF'] = train_df['gnomad_MAF'].fillna(train_gnomad_maf_median)
 
 #######################################################TEST DATA#######################################################
 test_files = []
@@ -217,10 +223,11 @@ test_df = make_variant_features(test_df)
 test_df = test_df.merge(gene_lof_df, on='gene_id', how='left')
 test_df = test_df.merge(maf_df, on='variant_id', how='left')
 
-#find rows with missing gene_lof
-#fill missing gene_lof with median
-test_df['gene_lof'] = test_df['gene_lof'].fillna(test_df['gene_lof'].median())
-test_df['gnomad_MAF'] = test_df['gnomad_MAF'].fillna(test_df['gnomad_MAF'].median())
+# Apply imputation using training data statistics (prevent data leakage)
+test_df['gene_lof'] = test_df['gene_lof'].fillna(train_gene_lof_median)
+test_df['gnomad_MAF'] = test_df['gnomad_MAF'].fillna(train_gnomad_maf_median)
+
+print(f"Applied training imputation statistics to test data")
 
 ##############################################################################################################
 # Calculate weights for standard training data
