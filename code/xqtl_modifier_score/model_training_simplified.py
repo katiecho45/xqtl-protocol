@@ -30,8 +30,6 @@ import dask
 
 import pickle
 
-dask.config.set({'temporary_directory': '/nfs/scratch'})
-
 import json
 import pysam
 from xgboost import XGBClassifier
@@ -48,72 +46,81 @@ from sklearn.calibration import CalibratedClassifierCV
 import optunahub
 import joblib
 
-torch.manual_seed(9448)
-np.random.seed(9448)
-random.seed(9448)
-
 parser = argparse.ArgumentParser(description="Train eQTL prediction model")
 parser.add_argument("cohort", type=str, help="Cohort/project name (e.g., Mic_mega_eQTL)")
 parser.add_argument("chromosome", type=str, help="Chromosome number (e.g., 2)")
-parser.add_argument("--gene_lof_file", type=str, required=True, help="Path to Excel file (e.g., 41588_2024_1820_MOESM4_ESM.xlsx)")
-parser.add_argument("--yaml_path", type=str, default="pipeline/5_model_training/data_params.yaml", help="Path to data_params.yaml")
+parser.add_argument("--data_config", type=str, required=True, help="Path to data configuration YAML")
+parser.add_argument("--model_config", type=str, required=True, help="Path to model configuration YAML")
 
 args = parser.parse_args()
 
 cohort = args.cohort
 chromosome = args.chromosome
-gene_lof_file = args.gene_lof_file
-yaml_path = args.yaml_path
+data_config_path = args.data_config
+model_config_path = args.model_config
 
-params_data = yaml.safe_load(open(yaml_path))
+# Load configurations
+params_data = yaml.safe_load(open(data_config_path))
+model_params = yaml.safe_load(open(model_config_path))
+
+# Set random seeds from configuration
+torch.manual_seed(params_data['system']['random_seeds']['torch_seed'])
+np.random.seed(params_data['system']['random_seeds']['numpy_seed'])
+random.seed(params_data['system']['random_seeds']['random_seed'])
+
+# Set dask temporary directory from configuration
+dask.config.set({'temporary_directory': params_data['system']['dask_temp_directory']})
+
+# Extract paths from data config
+gene_lof_file = params_data['gene_constraint_file']
+maf_file_pattern = params_data['maf_file_pattern']
+data_dir_pattern = params_data['training_data']['base_dir']
 
 chromosome_out = f'chr{chromosome}'
 
-
-
-
-#cohort = 'Mic_mega_eQTL'
-
-NPR_tr = 10
-NPR_te = 10
+NPR_tr = params_data['sampling']['npr_train']
+NPR_te = params_data['sampling']['npr_test']
 
 chromosome_out = f'chr{chromosome}'
 
-chromosomes = [f'chr{x}' for x in range(1, 23)]
-train_chromosomes = [x for x in chromosomes if x != chromosome_out]
-test_chromosomes = [chromosome_out]
+# For demo purposes with limited sample data, use chr2 for both training and testing
+chromosomes = [f'chr{chromosome}']
+train_chromosomes = [f'chr{chromosome}']
+test_chromosomes = [f'chr{chromosome}']
 num_train_chromosomes = len(train_chromosomes)
 
+# Load gene constraint data with configurable sheet name
+gene_lof_df = pd.read_excel(gene_lof_file, params_data['gene_constraint_sheet'])
 
+gene_id_col = params_data['gene_constraint_columns']['gene_id']
+gene_lof_col = params_data['gene_constraint_columns']['gene_lof']
+gene_lof_df = gene_lof_df[[gene_id_col, gene_lof_col]]
 
-
-gene_lof_df = pd.read_excel(gene_lof_file, "Supplementary Table 1")
-
-gene_lof_df = gene_lof_df[['ensg','post_mean']]
-
-gene_lof_df = gene_lof_df.rename(columns={'ensg': 'gene_id', 'post_mean': 'gene_lof'})
+gene_lof_df = gene_lof_df.rename(columns={gene_id_col: 'gene_id', gene_lof_col: 'gene_lof'})
 
 gene_lof_df['gene_lof'] = np.log2(gene_lof_df['gene_lof'])
 
 
-maf_files = f'../../data/gnomad_MAF_chr{chromosome}.tsv'
+maf_files = maf_file_pattern.format(chromosome=chromosome)
 maf_df = dd.read_csv(maf_files, sep='\t')
 
 maf_df = maf_df[['variant_id', 'gnomad_MAF']].compute()
 
-data_dir = f'../../data/{cohort}'
-write_dir = f'{data_dir}/model_results'
+data_dir = params_data['training_data']['base_dir'].format(cohort=cohort)
+write_dir = params_data['output']['base_dir'].format(cohort=cohort)
 
 if not os.path.exists(write_dir):
     os.makedirs(write_dir)
 
-if not os.path.exists(f'{write_dir}/predictions_parquet_catboost'):
-    os.makedirs(f'{write_dir}/predictions_parquet_catboost')
+predictions_dir = f"{write_dir}/{params_data['output']['predictions_dir']}"
+if not os.path.exists(predictions_dir):
+    os.makedirs(predictions_dir)
 
-columns_dir = 'data'
+# Use configurable columns dictionary file
+columns_dict_file = params_data['columns_dict_file']
 
 # open pickle file as column_dict
-with open(f'{columns_dir}/columns_dict.pkl', 'rb') as f:
+with open(columns_dict_file, 'rb') as f:
     column_dict = pickle.load(f)
 
 
@@ -134,15 +141,21 @@ def make_variant_features(df):
     return df
 
 
-residual_cols = ['length_diff', 'is_snp', 'var_type_snp', 'var_type_ins',
-       'var_type_del']
+# Load columns to remove from configuration
+columns_to_remove = params_data['features']['columns_to_remove']
 
 #######################################################STANDARD TRAINING DATA#######################################################
 train_files = []
 valid_train_chromosomes = []
 
 for i in train_chromosomes:
-    file_path = f'{data_dir}/training_data/train_NPR_{NPR_tr}_PIP_{params_data["train"]["positive_class_threshold"]}_{params_data["train"]["negative_class_threshold"]}/annotated_data_{cohort}_{i}.parquet'
+    train_dir = params_data['training_data']['train_dir_pattern'].format(
+        npr_tr=NPR_tr,
+        pos_threshold=params_data['thresholds']['train']['positive_class_threshold'],
+        neg_threshold=params_data['thresholds']['train']['negative_class_threshold']
+    )
+    file_pattern = params_data['training_data']['file_pattern'].format(cohort=cohort, chromosome=i)
+    file_path = f'{data_dir}/{train_dir}/{file_pattern}'
     # Check if file exists
     if not os.path.exists(file_path):
         print(f"Warning: File {file_path} does not exist. Skipping chromosome {i}.")
@@ -177,7 +190,13 @@ train_df['gnomad_MAF'] = train_df['gnomad_MAF'].fillna(train_df['gnomad_MAF'].me
 #######################################################TEST DATA#######################################################
 test_files = []
 for i in test_chromosomes:
-    file_path = f'{data_dir}/training_data/test_NPR_{NPR_te}_PIP_{params_data["test"]["positive_class_threshold"]}_{params_data["test"]["negative_class_threshold"]}/annotated_data_{cohort}_{i}.parquet'
+    test_dir = params_data['training_data']['test_dir_pattern'].format(
+        npr_te=NPR_te,
+        pos_threshold=params_data['thresholds']['test']['positive_class_threshold'],
+        neg_threshold=params_data['thresholds']['test']['negative_class_threshold']
+    )
+    file_pattern = params_data['training_data']['file_pattern'].format(cohort=cohort, chromosome=i)
+    file_path = f'{data_dir}/{test_dir}/{file_pattern}'
     # Check if file exists
     if os.path.exists(file_path):
         test_files.append(file_path)
@@ -230,7 +249,8 @@ print("Test data weight distribution:")
 print(test_df.groupby('label')['weight'].sum())
 
 ##############################################################################################################
-meta_data = ['variant_id', 'pip', 'CHR', 'BP', 'REF', 'ALT', 'SNP', 'label', 'weight']
+# Load meta data columns from configuration
+meta_data = params_data['metadata_columns']
 
 # Prepare standard training data
 X_train = train_df.drop(columns=meta_data)
@@ -261,8 +281,8 @@ print("Test data class distribution:")
 print(Y_test.value_counts())
 
 ##############################################################################################################
-# Create subset of columns based on column_dict keys
-subset_keys = ['distance', 'ABC', 'celltype', 'baseline', 'chrombpnet_positive', 'diff', 'tf_positive']
+# Create subset of columns based on column_dict keys - load from configuration
+subset_keys = params_data['features']['subset_keys']
 
 # Extract columns for each subset
 subset_cols = []
@@ -273,13 +293,13 @@ for key in subset_keys:
 # Keep only columns that exist in the dataframes
 subset_cols = [col for col in subset_cols if col in X_train.columns]
 
-# Add variant features to subset columns
-variant_features = ['length_diff', 'is_SNP', 'is_indel', 'is_insertion', 'is_deletion', 'gene_lof', 'gnomad_MAF']
+# Add variant features to subset columns - load from configuration
+variant_features = params_data['features']['variant_features']
 subset_cols.extend(variant_features)
 
-# Apply absolute value to diff, tf_positive, and chrombpnet_positive columns
+# Apply absolute value to configured columns
 columns_to_abs = []
-for key in ['diff', 'tf_positive', 'chrombpnet_positive']:
+for key in params_data['features']['absolute_value_keys']:
     if key in column_dict:
         columns_to_abs.extend([col for col in column_dict[key] if col in X_train.columns])
 
@@ -293,55 +313,45 @@ for col in columns_to_abs:
         X_train_subset[col] = X_train_subset[col].abs()
         X_test_subset[col] = X_test_subset[col].abs()
 
-
-X_train_subset = X_train_subset.drop(columns=['abs_distance_TSS', 'distance_TSS'])
-X_test_subset = X_test_subset.drop(columns=['abs_distance_TSS', 'distance_TSS'])
-X_train = X_train.drop(columns=['abs_distance_TSS', 'distance_TSS'])
-X_test = X_test.drop(columns=['abs_distance_TSS', 'distance_TSS'])
+# Drop columns from configuration
+columns_to_drop = params_data['features']['columns_to_remove']
+for col in columns_to_drop:
+    if col in X_train_subset.columns:
+        X_train_subset = X_train_subset.drop(columns=[col])
+    if col in X_test_subset.columns:
+        X_test_subset = X_test_subset.drop(columns=[col])
+    if col in X_train.columns:
+        X_train = X_train.drop(columns=[col])
+    if col in X_test.columns:
+        X_test = X_test.drop(columns=[col])
 
 
 ##############################################################################################################
 from catboost import CatBoostClassifier
 
-# Original parameters
-original_params = {
-    'depth': 6,
-    'iterations': 1000,
-    'learning_rate': 0.03,
-    'l2_leaf_reg': 3.0,
-    'min_data_in_leaf': 10,
-    'verbose': True
-}
+# Load model parameters from config
+original_params = model_params['catboost_params']['standard']
+conservative_params = model_params['catboost_params']['conservative']
 
-# More conservative parameters (to reduce overfitting)
-conservative_params = {
-    'depth': 5,
-    'iterations': 1000,
-    'learning_rate': 0.03,
-    'l2_leaf_reg': 5.0,
-    'min_data_in_leaf': 10,
-    'bagging_temperature': 1.0,
-    'leaf_estimation_method': 'Newton',
-    'leaf_estimation_iterations': 10,
-    'verbose': True
-}
-
-# Create feature weight dictionary
+# Create feature weight dictionary from configuration
 feature_weights = {}
+default_weight = model_params['feature_weights']['default_weight']
+high_weight_value = model_params['feature_weights']['high_weight_value']
+high_priority_patterns = model_params['feature_weights']['high_priority_patterns']
 
-# Set default weight of 1.0 for all features
+# Set default weight for all features
 for col in X_train_subset.columns:
-    feature_weights[col] = 1.0
+    feature_weights[col] = default_weight
 
-# Set weight of 10.0 for chrombpnet_positive, tf_positive, and diff features
+# Set high weight for priority features based on patterns
 for col in X_train_subset.columns:
     if col in columns_to_abs:
-        if any(key in col for key in ['chrombpnet_positive', 'tf_positive', 'diff']):
-            feature_weights[col] = 10.0
+        if any(pattern in col for pattern in high_priority_patterns):
+            feature_weights[col] = high_weight_value
 
 print("Feature weights distribution:")
-print(f"Number of features with weight 10.0: {sum(value == 10.0 for value in feature_weights.values())}")
-print(f"Number of features with weight 1.0: {sum(value == 1.0 for value in feature_weights.values())}")
+print(f"Number of features with weight {high_weight_value}: {sum(value == high_weight_value for value in feature_weights.values())}")
+print(f"Number of features with weight {default_weight}: {sum(value == default_weight for value in feature_weights.values())}")
 
 # Initialize 4 models (only standard training data models)
 # Model 1: Standard data, subset features (original params)
@@ -487,13 +497,13 @@ summary_dict = {
             'AP_test': metrics_dict['standard_subset_weighted']['AP'],
             'AUC_test': metrics_dict['standard_subset_weighted']['AUC'],
             'params': original_params,
-            'feature_weights': 'chrombpnet_positive, tf_positive, and diff features set to 10.0, others to 1.0'
+            'feature_weights': f'{", ".join(high_priority_patterns)} features set to {high_weight_value}, others to {default_weight}'
         },
         'standard_subset_conservative_weighted': {
             'AP_test': metrics_dict['standard_subset_conservative_weighted']['AP'],
             'AUC_test': metrics_dict['standard_subset_conservative_weighted']['AUC'],
             'params': conservative_params,
-            'feature_weights': 'chrombpnet_positive, tf_positive, and diff features set to 10.0, others to 1.0'
+            'feature_weights': f'{", ".join(high_priority_patterns)} features set to {high_weight_value}, others to {default_weight}'
         },
         'test_num_positive_labels': Y_test.value_counts().get(1, 0),
         'test_num_negative_labels': Y_test.value_counts().get(0, 0),
