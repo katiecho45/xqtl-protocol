@@ -92,7 +92,9 @@ print(f"NOTE: Currently using same chromosome ({chromosome}) for train/test due 
 print(f"The train/test split will rely on different data directories with different sampling thresholds.")
 
 # Load gene constraint data with configurable sheet name
-gene_lof_df = pd.read_excel(gene_lof_file, params_data['gene_constraint_sheet'])
+# Load gene constraint data generically
+constraint_config = data_config["input_files"]["gene_constraint"]
+gene_lof_df = pd.read_excel(constraint_config["file_path"], constraint_config["xlsx_sheet"])
 
 gene_id_col = params_data['gene_constraint_columns']['gene_id']
 gene_lof_col = params_data['gene_constraint_columns']['gene_lof']
